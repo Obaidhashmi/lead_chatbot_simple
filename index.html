@@ -1,0 +1,813 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IPEI Training Institute Dashboard</title>
+<style>
+  html, body, #root { margin: 0; padding: 0; height: 100%; background: #14171C; overflow: hidden; }
+  #boot-error {
+    display: none;
+    font-family: monospace;
+    color: #ff6b6b;
+    background: #1a1a1a;
+    padding: 20px;
+    white-space: pre-wrap;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="boot-error"></div>
+
+<script>
+  window.addEventListener("error", function (e) {
+    var box = document.getElementById("boot-error");
+    box.style.display = "block";
+    box.textContent = "Page failed to load:\n\n" + (e.error ? (e.error.stack || e.error.message) : e.message);
+  });
+</script>
+
+<script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useEffect, useRef } = React;
+
+// ---- Supabase config (SAME project as the IA dashboard — only the table differs) ----
+const SUPABASE_URL = "https://hpcujmxctvmwqkjyvtix.supabase.co";
+const SUPABASE_KEY = "sb_publishable_EaEZnMxM2ZF41h3-UTOa8w_XE0naOKD";
+const TABLE_NAME = "ti_messages";
+
+async function fetchMessages() {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE_NAME}?select=*&order=created_at.asc`, {
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+    },
+  });
+  if (!res.ok) throw new Error("Failed to fetch messages: " + res.status);
+  return res.json();
+}
+
+// Groups flat message rows (phone, sender, message, created_at) into
+// per-lead conversation objects the rest of the UI already expects.
+function buildLeadsFromMessages(rows) {
+  const byPhone = {};
+  for (const row of rows) {
+    if (!row.phone) continue;
+    if (!byPhone[row.phone]) {
+      byPhone[row.phone] = {
+        id: row.phone,
+        phone: row.phone,
+        name: row.phone,
+        currentStep: "New Lead",
+        applicantType: "",
+        companyName: "",
+        qualification: "",
+        experience: "",
+        goal: "",
+        studyMode: "",
+        city: "",
+        schedule: "",
+        program: "",
+        segment: "",
+        fee: "",
+        duration: "",
+        aiOptIn: "",
+        messages: [],
+        unread: 0,
+      };
+    }
+    if (row.message) {
+      const from = row.sender === "lead" ? "lead" : row.sender === "agent" ? "agent" : "bot";
+      byPhone[row.phone].messages.push({
+        from,
+        text: row.message,
+        time: new Date(row.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        rawTime: row.created_at,
+      });
+    }
+  }
+  const leads = Object.values(byPhone);
+  leads.forEach((l) => {
+    const last = l.messages[l.messages.length - 1];
+    l.lastMessage = last ? last.text : "";
+    l.lastActivity = last ? timeAgo(last.rawTime) : "";
+    l.currentStep = last && last.from === "lead" ? "Awaiting Reply" : "New Lead";
+  });
+  // newest activity first
+  leads.sort((a, b) => {
+    const at = a.messages[a.messages.length - 1]?.rawTime || "";
+    const bt = b.messages[b.messages.length - 1]?.rawTime || "";
+    return bt.localeCompare(at);
+  });
+  return leads;
+}
+
+function timeAgo(iso) {
+  if (!iso) return "";
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "Just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs} hr ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+}
+// Industrial control-panel palette — ties back to IPEI's own domain
+// (Industrial Automation / Power & Energy) rather than a generic CRM look.
+const COLORS = {
+  bg: "#14171C",
+  surface: "#1B1F26",
+  surfaceRaised: "#20252D",
+  border: "#2A3038",
+  borderLit: "#3A4250",
+  text: "#E8EAED",
+  textMuted: "#8B94A3",
+  textFaint: "#5B6472",
+  amber: "#F0A83C",
+  blue: "#4FA8D8",
+  green: "#4CAF7D",
+  red: "#E1615B",
+};
+
+const STAGE_META = {
+  "New Lead": { color: COLORS.blue, label: "New Lead" },
+  "Qualifying": { color: COLORS.amber, label: "Qualifying" },
+  "Program Match": { color: COLORS.amber, label: "Program Match" },
+  "Fee Discussion": { color: COLORS.amber, label: "Fee Discussion" },
+  "Enrolled": { color: COLORS.green, label: "Enrolled" },
+  "Dropped": { color: COLORS.red, label: "Dropped" },
+  "Awaiting Reply": { color: COLORS.textFaint, label: "Awaiting Reply" },
+};
+
+
+const STAGE_ORDER = [
+  "New Lead",
+  "Qualifying",
+  "Program Match",
+  "Fee Discussion",
+  "Enrolled",
+  "Awaiting Reply",
+  "Dropped",
+];
+
+function StatusDot({ color, pulse }) {
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        width: 7,
+        height: 7,
+        borderRadius: "50%",
+        background: color,
+        boxShadow: pulse ? `0 0 0 3px ${color}22` : "none",
+        flexShrink: 0,
+      }}
+    />
+  );
+}
+
+function FieldRow({ label, value }) {
+  if (!value) return null;
+  return (
+    <div style={{ display: "flex", gap: 12, padding: "9px 0", borderBottom: `1px solid ${COLORS.border}` }}>
+      <div
+        style={{
+          width: 120,
+          flexShrink: 0,
+          fontSize: 11,
+          letterSpacing: "0.04em",
+          textTransform: "uppercase",
+          color: COLORS.textFaint,
+          fontFamily: "'IBM Plex Sans', sans-serif",
+          paddingTop: 2,
+        }}
+      >
+        {label}
+      </div>
+      <div style={{ fontSize: 13.5, color: COLORS.text, fontFamily: "'IBM Plex Mono', monospace", lineHeight: 1.5 }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function IPEILeadsDashboard() {
+  const [leads, setLeads] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [selectedId, setSelectedId] = useState(null);
+  const [stageFilter, setStageFilter] = useState("All");
+  const [search, setSearch] = useState("");
+  const [now, setNow] = useState(new Date());
+  const [showDetail, setShowDetail] = useState(true);
+  const [draft, setDraft] = useState("");
+  const chatScrollRef = useRef(null);
+
+  const loadLeads = async () => {
+    try {
+      const rows = await fetchMessages();
+      const built = buildLeadsFromMessages(rows);
+      setLeads((prev) => {
+        // preserve currently selected lead's scroll-worthy identity
+        return built;
+      });
+      setError(null);
+    } catch (e) {
+      setError(e.message || "Could not load data");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadLeads();
+    const poll = setInterval(loadLeads, 15000); // refresh every 15s
+    return () => clearInterval(poll);
+  }, []);
+
+  useEffect(() => {
+    if (!selectedId && leads.length > 0) setSelectedId(leads[0].id);
+  }, [leads, selectedId]);
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 1000 * 30);
+    return () => clearInterval(t);
+  }, []);
+
+  const selectedForScroll = leads.find((l) => l.id === selectedId);
+  useEffect(() => {
+    if (chatScrollRef.current) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+    }
+  }, [selectedId, selectedForScroll?.messages?.length]);
+
+  const filtered = useMemo(() => {
+    return leads.filter((l) => {
+      const matchStage = stageFilter === "All" || l.currentStep === stageFilter;
+      const q = search.trim().toLowerCase();
+      const matchSearch =
+        !q ||
+        l.name.toLowerCase().includes(q) ||
+        l.phone.toLowerCase().includes(q) ||
+        (l.program || "").toLowerCase().includes(q) ||
+        (l.city || "").toLowerCase().includes(q);
+      return matchStage && matchSearch;
+    });
+  }, [leads, stageFilter, search]);
+
+  const selected = leads.find((l) => l.id === selectedId) || filtered[0];
+
+  const stageCounts = useMemo(() => {
+    const counts = {};
+    STAGE_ORDER.forEach((s) => (counts[s] = 0));
+    leads.forEach((l) => {
+      counts[l.currentStep] = (counts[l.currentStep] || 0) + 1;
+    });
+    return counts;
+  }, [leads]);
+
+  const totalUnread = leads.reduce((sum, l) => sum + l.unread, 0);
+  const activeToday = leads.filter((l) => l.lastActivity.includes("min") || l.lastActivity.includes("hr")).length;
+
+  const markRead = (id) => {
+    setLeads((prev) => prev.map((l) => (l.id === id ? { ...l, unread: 0 } : l)));
+  };
+
+  const sendMessage = () => {
+    if (!draft.trim() || !selected) return;
+    const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    setLeads((prev) =>
+      prev.map((l) =>
+        l.id === selected.id
+          ? { ...l, messages: [...l.messages, { from: "agent", text: draft.trim(), time }], lastMessage: draft.trim(), lastActivity: "Just now" }
+          : l
+      )
+    );
+    setDraft("");
+  };
+
+  return (
+    <div
+      style={{
+        fontFamily: "'Inter', sans-serif",
+        background: COLORS.bg,
+        color: COLORS.text,
+        height: "100vh",
+        overflow: "hidden",
+        display: "flex",
+        flexDirection: "column",
+        fontSize: 14,
+      }}
+    >
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Sans:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+        * { box-sizing: border-box; }
+        ::selection { background: ${COLORS.blue}44; }
+        .scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+        .scrollbar::-webkit-scrollbar-thumb { background: ${COLORS.borderLit}; border-radius: 3px; }
+        .scrollbar::-webkit-scrollbar-track { background: transparent; }
+        button { font-family: inherit; cursor: pointer; }
+        input { font-family: inherit; }
+        .row-hover:hover { background: ${COLORS.surfaceRaised} !important; }
+        .bubble-in { animation: fadeIn 0.15s ease; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+        @media (max-width: 1100px) {
+          .detail-panel { display: none !important; }
+        }
+        @media (max-width: 860px) {
+          .main-grid { grid-template-columns: 0px 1fr !important; }
+          .stage-panel { display: none !important; }
+        }
+        @media (max-width: 620px) {
+          .main-grid { grid-template-columns: 1fr !important; }
+          .list-panel { display: none !important; }
+          .list-panel.force-show { display: flex !important; }
+          .chat-panel.force-hide { display: none !important; }
+        }
+      `}</style>
+
+      {/* Top bar */}
+      <div
+        style={{
+          borderBottom: `1px solid ${COLORS.border}`,
+          padding: "14px 24px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          background: COLORS.surface,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div
+            style={{
+              width: 32,
+              height: 32,
+              borderRadius: 6,
+              background: COLORS.bg,
+              border: `1px solid ${COLORS.borderLit}`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: COLORS.amber,
+              fontFamily: "'IBM Plex Mono', monospace",
+              fontWeight: 500,
+              fontSize: 13,
+            }}
+          >
+            TI
+          </div>
+          <div>
+            <div style={{ fontFamily: "'IBM Plex Sans', sans-serif", fontWeight: 600, fontSize: 15 }}>
+              IPEI Training Institute
+            </div>
+            <div style={{ fontSize: 11, color: COLORS.textFaint, fontFamily: "'IBM Plex Mono', monospace" }}>
+              WhatsApp Admissions Console
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 28 }}>
+          <Readout label="Total Leads" value={leads.length} />
+          <Readout label="Active Today" value={activeToday} color={COLORS.blue} />
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <StatusDot color={error ? COLORS.red : loading ? COLORS.textFaint : COLORS.green} pulse={!error && !loading} />
+            <span style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: COLORS.textFaint }}>
+              {error ? "Offline" : loading ? "Syncing..." : "Live"}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {error && (
+        <div
+          style={{
+            background: "#3A1A18",
+            borderBottom: `1px solid ${COLORS.red}55`,
+            color: "#F0A8A3",
+            fontSize: 12.5,
+            padding: "8px 24px",
+            fontFamily: "'IBM Plex Mono', monospace",
+          }}
+        >
+          Couldn't reach Supabase — {error}
+        </div>
+      )}
+
+      <div
+        className="main-grid"
+        style={{
+          display: "grid",
+          gridTemplateColumns: `210px 290px 1fr ${showDetail ? "320px" : "0px"}`,
+          flex: 1,
+          minHeight: 0,
+          transition: "grid-template-columns 0.15s ease",
+        }}
+      >
+        {/* Left: stage filters */}
+        <div className="stage-panel" style={{ borderRight: `1px solid ${COLORS.border}`, padding: "18px 14px", background: COLORS.surface }}>
+          <div style={{ fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase", color: COLORS.textFaint, marginBottom: 10, paddingLeft: 6 }}>
+            Pipeline
+          </div>
+          <StageButton label="All" count={leads.length} active={stageFilter === "All"} onClick={() => setStageFilter("All")} />
+          {STAGE_ORDER.map((s) => (
+            <StageButton
+              key={s}
+              label={s}
+              count={stageCounts[s] || 0}
+              color={STAGE_META[s]?.color}
+              active={stageFilter === s}
+              onClick={() => setStageFilter(s)}
+            />
+          ))}
+
+          <div style={{ marginTop: 24, padding: "10px 6px", borderTop: `1px solid ${COLORS.border}` }}>
+            <div style={{ fontSize: 10.5, color: COLORS.textFaint, lineHeight: 1.6, fontFamily: "'IBM Plex Mono', monospace" }}>
+              SOURCE: Supabase<br />+ WhatsApp Live
+            </div>
+          </div>
+        </div>
+
+        {/* Lead list */}
+        <div className="list-panel" style={{ display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, borderRight: `1px solid ${COLORS.border}` }}>
+          <div style={{ padding: "12px 16px", borderBottom: `1px solid ${COLORS.border}` }}>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search name, phone, program, city..."
+              style={{
+                width: "100%",
+                background: COLORS.surfaceRaised,
+                border: `1px solid ${COLORS.border}`,
+                borderRadius: 6,
+                padding: "8px 12px",
+                color: COLORS.text,
+                fontSize: 13,
+                outline: "none",
+              }}
+            />
+          </div>
+          <div className="scrollbar" style={{ overflowY: "auto", flex: 1 }}>
+            {loading && leads.length === 0 && (
+              <div style={{ padding: 32, textAlign: "center", color: COLORS.textFaint, fontSize: 13 }}>
+                Loading conversations...
+              </div>
+            )}
+            {!loading && filtered.length === 0 && (
+              <div style={{ padding: 32, textAlign: "center", color: COLORS.textFaint, fontSize: 13 }}>
+                {leads.length === 0 ? "No messages yet — send \"Hi\" on WhatsApp to test." : "No leads match this filter."}
+              </div>
+            )}
+            {filtered.map((l) => {
+              const meta = STAGE_META[l.currentStep] || { color: COLORS.textFaint };
+              const isSelected = selected && l.id === selected.id;
+              return (
+                <div
+                  key={l.id}
+                  className="row-hover"
+                  onClick={() => {
+                    setSelectedId(l.id);
+                    markRead(l.id);
+                  }}
+                  style={{
+                    padding: "13px 16px",
+                    borderBottom: `1px solid ${COLORS.border}`,
+                    cursor: "pointer",
+                    background: isSelected ? COLORS.surfaceRaised : "transparent",
+                    borderLeft: isSelected ? `2px solid ${COLORS.amber}` : "2px solid transparent",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                      <StatusDot color={meta.color} pulse={l.unread > 0} />
+                      <span style={{ fontWeight: 600, fontSize: 13.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {l.name}
+                      </span>
+                    </div>
+                    <span style={{ fontSize: 10.5, color: COLORS.textFaint, fontFamily: "'IBM Plex Mono', monospace", flexShrink: 0 }}>
+                      {l.lastActivity}
+                    </span>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: COLORS.textMuted,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      marginBottom: 4,
+                    }}
+                  >
+                    {l.lastMessage}
+                  </div>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <Tag color={meta.color}>{l.currentStep}</Tag>
+                    {l.segment && <Tag muted>{l.segment}</Tag>}
+                    {l.unread > 0 && (
+                      <span
+                        style={{
+                          marginLeft: "auto",
+                          background: COLORS.amber,
+                          color: "#1A1400",
+                          fontSize: 10,
+                          fontWeight: 700,
+                          borderRadius: 10,
+                          padding: "1px 6px",
+                          fontFamily: "'IBM Plex Mono', monospace",
+                        }}
+                      >
+                        {l.unread}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Middle: chat thread */}
+        <div className="chat-panel" style={{ display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, background: COLORS.bg, borderRight: showDetail ? `1px solid ${COLORS.border}` : "none" }}>
+          {selected ? (
+            <>
+              <div
+                style={{
+                  padding: "12px 18px",
+                  borderBottom: `1px solid ${COLORS.border}`,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  background: COLORS.surface,
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <StatusDot color={(STAGE_META[selected.currentStep] || {}).color} />
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 14 }}>{selected.name}</div>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.textFaint }}>
+                      {selected.phone}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowDetail((v) => !v)}
+                  style={{
+                    background: "transparent",
+                    border: `1px solid ${COLORS.border}`,
+                    borderRadius: 5,
+                    color: COLORS.textMuted,
+                    fontSize: 11.5,
+                    padding: "6px 10px",
+                  }}
+                >
+                  {showDetail ? "Hide Info" : "Lead Info"}
+                </button>
+              </div>
+
+              <div ref={chatScrollRef} className="scrollbar" style={{ flex: 1, overflowY: "auto", padding: "18px 20px", display: "flex", flexDirection: "column", gap: 3 }}>
+                {selected.messages.map((m, i) => (
+                  <ChatBubble key={i} msg={m} />
+                ))}
+                {selected.messages.length === 0 && (
+                  <div style={{ color: COLORS.textFaint, fontSize: 13, textAlign: "center", marginTop: 40 }}>
+                    No messages yet.
+                  </div>
+                )}
+              </div>
+
+              <div
+                style={{
+                  padding: "10px 16px",
+                  borderTop: `1px solid ${COLORS.border}`,
+                  background: COLORS.surface,
+                  fontSize: 11.5,
+                  color: COLORS.textFaint,
+                  fontFamily: "'IBM Plex Mono', monospace",
+                  textAlign: "center",
+                }}
+              >
+                Read-only view — replies are sent automatically by the WhatsApp bot
+              </div>
+            </>
+          ) : (
+            <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: COLORS.textFaint, fontSize: 13 }}>
+              Select a lead to view conversation.
+            </div>
+          )}
+        </div>
+
+        {/* Right: lead detail panel (collapsible) */}
+        {showDetail && (
+          <div className="detail-panel scrollbar" style={{ overflowY: "auto", background: COLORS.surface, padding: "20px 22px" }}>
+            {selected ? (
+              <>
+                <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+                  <a
+                    href={`https://wa.me/${selected.phone}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      flex: 1,
+                      textAlign: "center",
+                      padding: "9px 10px",
+                      borderRadius: 6,
+                      border: "none",
+                      background: COLORS.amber,
+                      color: "#1A1400",
+                      fontSize: 12.5,
+                      fontWeight: 700,
+                      textDecoration: "none",
+                    }}
+                  >
+                    Open on WhatsApp
+                  </a>
+                </div>
+
+                <SectionLabel>Lead Details</SectionLabel>
+                <div style={{ marginBottom: 20 }}>
+                  <FieldRow label="Current Step" value={selected.currentStep} />
+                  <FieldRow label="Applicant Type" value={selected.applicantType} />
+                  <FieldRow label="Company" value={selected.companyName} />
+                  <FieldRow label="Qualification" value={selected.qualification} />
+                  <FieldRow label="Experience" value={selected.experience} />
+                  <FieldRow label="Goal" value={selected.goal} />
+                  <FieldRow label="City" value={selected.city} />
+                </div>
+
+                <SectionLabel>Program</SectionLabel>
+                <div style={{ marginBottom: 20 }}>
+                  <FieldRow label="Program" value={selected.program} />
+                  <FieldRow label="Segment" value={selected.segment} />
+                  <FieldRow label="Study Mode" value={selected.studyMode} />
+                  <FieldRow label="Schedule" value={selected.schedule} />
+                  <FieldRow label="Fee" value={selected.fee} />
+                  <FieldRow label="Duration" value={selected.duration} />
+                </div>
+
+                <SectionLabel>Bot Settings</SectionLabel>
+                <div>
+                  <FieldRow label="AI Opt-In" value={selected.aiOptIn} />
+                  <FieldRow label="Last Activity" value={selected.lastActivity} />
+                </div>
+              </>
+            ) : (
+              <div style={{ color: COLORS.textFaint, fontSize: 13 }}>Select a lead to view details.</div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SectionLabel({ children }) {
+  return (
+    <div
+      style={{
+        fontSize: 11,
+        letterSpacing: "0.06em",
+        textTransform: "uppercase",
+        color: COLORS.textFaint,
+        fontWeight: 600,
+        marginBottom: 8,
+        paddingBottom: 6,
+        borderBottom: `1px solid ${COLORS.border}`,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function ChatBubble({ msg }) {
+  const isLead = msg.from === "lead";
+  const isBot = msg.from === "bot";
+  return (
+    <div className="bubble-in" style={{ display: "flex", justifyContent: isLead ? "flex-start" : "flex-end", marginBottom: 6 }}>
+      <div
+        style={{
+          maxWidth: "72%",
+          background: isLead ? COLORS.surfaceRaised : isBot ? "#1E3A4A" : "#2E4430",
+          border: `1px solid ${isLead ? COLORS.border : isBot ? "#2E5468" : "#3D5C3A"}`,
+          borderRadius: 10,
+          padding: "8px 12px",
+          fontSize: 13.5,
+          lineHeight: 1.5,
+        }}
+      >
+        {!isLead && (
+          <div style={{ fontSize: 10, color: isBot ? COLORS.blue : COLORS.green, fontWeight: 700, marginBottom: 2, letterSpacing: "0.03em" }}>
+            {isBot ? "SARA (AI)" : "AGENT"}
+          </div>
+        )}
+        <div>{msg.text}</div>
+        <div style={{ fontSize: 10, color: COLORS.textFaint, marginTop: 4, textAlign: "right", fontFamily: "'IBM Plex Mono', monospace" }}>
+          {msg.time}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Readout({ label, value, color }) {
+  return (
+    <div style={{ textAlign: "right" }}>
+      <div style={{ fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", color: COLORS.textFaint }}>
+        {label}
+      </div>
+      <div
+        style={{
+          fontFamily: "'IBM Plex Mono', monospace",
+          fontSize: 17,
+          fontWeight: 500,
+          color: color || COLORS.text,
+        }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function StageButton({ label, count, color, active, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        width: "100%",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        background: active ? COLORS.surfaceRaised : "transparent",
+        border: "none",
+        borderRadius: 5,
+        padding: "8px 8px",
+        marginBottom: 2,
+        color: active ? COLORS.text : COLORS.textMuted,
+        fontSize: 12.5,
+        fontWeight: active ? 600 : 500,
+        textAlign: "left",
+      }}
+    >
+      {color ? <StatusDot color={color} /> : <span style={{ width: 7 }} />}
+      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.textFaint }}>{count}</span>
+    </button>
+  );
+}
+
+function Tag({ children, color, muted }) {
+  return (
+    <span
+      style={{
+        fontSize: 10.5,
+        padding: "2px 7px",
+        borderRadius: 3,
+        fontFamily: "'IBM Plex Mono', monospace",
+        border: `1px solid ${muted ? COLORS.border : (color || COLORS.border) + "55"}`,
+        color: muted ? COLORS.textFaint : color || COLORS.textMuted,
+        background: muted ? "transparent" : (color || COLORS.textMuted) + "14",
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+function ActionButton({ children, primary }) {
+  return (
+    <button
+      style={{
+        flex: 1,
+        padding: "9px 10px",
+        borderRadius: 6,
+        border: primary ? "none" : `1px solid ${COLORS.border}`,
+        background: primary ? COLORS.amber : "transparent",
+        color: primary ? "#1A1400" : COLORS.textMuted,
+        fontSize: 12.5,
+        fontWeight: 600,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+
+try {
+  const root = ReactDOM.createRoot(document.getElementById("root"));
+  root.render(<IPEILeadsDashboard />);
+} catch (e) {
+  var box = document.getElementById("boot-error");
+  box.style.display = "block";
+  box.textContent = "Render failed:\n\n" + e.stack;
+}
+</script>
+</body>
+</html>
