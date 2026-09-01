@@ -82,7 +82,7 @@ function buildLeadsFromMessages(rows) {
         unread: 0,
       };
     }
-    if (row.message) {
+    if (row.message && row.phone) {
       const from = row.sender === "lead" ? "lead" : row.sender === "agent" ? "agent" : "bot";
       byPhone[row.phone].messages.push({
         from,
