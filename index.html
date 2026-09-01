@@ -43,7 +43,7 @@ const SUPABASE_KEY = "sb_publishable_EaEZnMxM2ZF41h3-UTOa8w_XE0naOKD";
 const TABLE_NAME = "ti_messages";
 
 async function fetchMessages() {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE_NAME}?select=*&order=created_at.asc`, {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE_NAME}?select=*&order=created_at.asc&limit=5000` {
     headers: {
       apikey: SUPABASE_KEY,
       Authorization: `Bearer ${SUPABASE_KEY}`,
